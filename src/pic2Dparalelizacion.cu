@@ -44,6 +44,8 @@ __global__ void inicializacionVariables(float *ne, float *n, float *phi, float *
 	}
 
 }
+
+
 //////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Calculo de la densidad.
@@ -528,16 +530,41 @@ void eval (float *rx_d, float *vx_d,float *ry_d, float *vy_d, float *dydt1_d, fl
 
 }
 //////////////////////////////////////////////////////////////////////////////////////////
-__global__ void inicializardydx1Dydx2(float *dydx1_d, float *dydx2_d, int N){
+__global__ void inicializardydx1Dydx2(float *dydx1_d, float *dydx2_d, float *k1_d, float *k2_d, float *k3_d, float * k4_d,
+		 float *l1_d, float *l2_d, float *l3_d, float *l4_d, float *f1_d,float *f2_d, int N){
+
+	int Id = blockIdx.x * blockDim.x + threadIdx.x;
+		if (Id < (2*N)) {
+			dydx1_d[Id] = 0.0;
+			dydx2_d[Id] = 0.0;
+			k1_d[Id] = 0.0;
+			k2_d[Id] = 0.0;
+			k3_d[Id] = 0.0;
+			k4_d[Id] = 0.0;
+			l1_d[Id] = 0.0;
+			l2_d[Id] = 0.0;
+			l3_d[Id] = 0.0;
+			l4_d[Id] = 0.0;
+			f1_d[Id] = 0.0;
+			f1_d[Id] = 0.0;
+		}
+}
+
+
+__global__ void inicializarAux(float *rx_aux, float *ry_aux, float *vx_aux, float *vy_aux,  int N){
 
 	int Id = blockIdx.x * blockDim.x + threadIdx.x;
 		if (Id < (N)) {
-			dydx1_d[Id] = 0.0;
-			dydx2_d[Id] = 0.0;
+			rx_aux[Id] = 0.0;
+			ry_aux[Id] = 0.0;
+			vx_aux[Id] = 0.0;
+			vy_aux[Id] = 0.0;
+
 		}
-
-
 }
+
+
+
 /////////////////////////////////////////////////////////////////////////////////////////////////////
 __global__ void calculoPrimerasVariablesKLRK4(float *k1_d, float *l1_d, float *dydx1_d,
 		float *dydx2_d,int N, float dt){
@@ -555,9 +582,9 @@ __global__ void calculoSegundasVariablesF1F2RK4(float *k1_d, float *l1_d,float *
 	int i = blockIdx.x * blockDim.x + threadIdx.x;
 	if (i < N){
 		f1_d[i]=(rx_d[i]+k1_d[i]/2.);
-		f1_d[N+i]=(vx_d[i]+k1_d[N+i]/2.);
+		f1_d[i+N]=(vx_d[i]+k1_d[i+N]/2.);
 		f2_d[i]=(ry_d[i]+l1_d[i]/2.);
-		f2_d[N+i]=(vy_d[i]+l1_d[N+i]/2.);
+		f2_d[i+N]=(vy_d[i]+l1_d[i+N]/2.);
 
 	}
 
@@ -569,9 +596,9 @@ __global__ void calculoDefinitivoRK4(float *k1_d,float *k2_d,float *k3_d,float *
 	int i = blockIdx.x * blockDim.x + threadIdx.x;
 	if (i < N){
 		rx_d[i] += k1_d[i] / 6. + k2_d[i] / 3. + k3_d[i] / 3. + k4_d[i] / 6.;
-		vx_d[i] += (k1_d[N+i] / 6. + k2_d[N+i] / 3. + k3_d[N+i] / 3. + k4_d[N+i] / 6.);
+		vx_d[i] += (k1_d[i+N] / 6. + k2_d[i+N] / 3. + k3_d[i+N] / 3. + k4_d[i+N] / 6.);
 		ry_d[i] += l1_d[i] / 6. + l2_d[i] / 3. + l3_d[i] / 3. + l4_d[i] / 6.;
-		vy_d[i] += (l1_d[N+i] / 6. + l2_d[N+i] / 3. + l3_d[N+i] / 3. + l4_d[N+i] / 6.);
+		vy_d[i] += (l1_d[i+N]/ 6. + l2_d[i+N] / 3. + l3_d[i+N] / 3. + l4_d[i+N] / 6.);
 
 	}
 
@@ -582,7 +609,7 @@ __global__ void calculoDefinitivoRK4(float *k1_d,float *k2_d,float *k3_d,float *
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void rungeKutta(float t, float *rx_d, float *ry_d, float *vx_d, float *vy_d, float dt){
+void rungeKutta(float &t, float *rx_d, float *ry_d, float *vx_d, float *vy_d, float dt){
 
 	int size = N * sizeof(float);
 	int size1 = 2*N * sizeof(float);
@@ -591,8 +618,8 @@ void rungeKutta(float t, float *rx_d, float *ry_d, float *vx_d, float *vy_d, flo
 	float *k1_d, *k2_d,*k3_d, *k4_d,*l1_d,*l2_d,*l3_d,*l4_d,*f1_d,*f2_d;
 	float *rx_aux, *ry_aux, *vx_aux, *vy_aux;
 	///////////////////////////////////////////////////////////////////////////////////
-	cudaMalloc((void **) &dydx1_d, size);
-	cudaMalloc((void **) &dydx2_d, size);
+	cudaMalloc((void **) &dydx1_d, size1);
+	cudaMalloc((void **) &dydx2_d, size1);
 	cudaMalloc((void **) &k1_d, size1);
 	cudaMalloc((void **) &k2_d, size1);
 	cudaMalloc((void **) &k3_d, size1);
@@ -607,19 +634,27 @@ void rungeKutta(float t, float *rx_d, float *ry_d, float *vx_d, float *vy_d, flo
 	cudaMalloc((void **) &ry_aux, size);
 	cudaMalloc((void **) &vx_aux, size);
 	cudaMalloc((void **) &vy_aux, size);
+
+
 	//////////////////////////////////////////////////////////////////////////////////////
 	float blockSize = 1024;
 
 	// cantidad de nloques  utilizar en el calculo.
 	dim3 dimBlock(ceil(N / blockSize), 1, 1);
+	dim3 dimBlock1(ceil(2*N / blockSize), 1, 1);
 	dim3 dimGrid(blockSize, 1, 1);
 
-	inicializardydx1Dydx2<<<dimGrid, dimBlock>>>(dydx1_d, dydx2_d, N);
+	inicializardydx1Dydx2<<<dimGrid, dimBlock1>>>(dydx1_d, dydx2_d,k1_d,k2_d, k3_d, k4_d,
+												 l1_d,l2_d,l3_d,l4_d,f1_d,f2_d, N);
 	cudaDeviceSynchronize();
+
+	inicializarAux<<<dimGrid, dimBlock>>>(rx_aux,ry_aux,vx_aux, vy_aux,N);
+	cudaDeviceSynchronize();
+
 	//Paso O.
 	eval (rx_d, vx_d,ry_d, vy_d, dydx1_d, dydx2_d);
 
-	dim3 dimBlock1(ceil(2*N / blockSize), 1, 1);
+
 	calculoPrimerasVariablesKLRK4<<<dimGrid, dimBlock1>>>(k1_d,l1_d, dydx1_d, dydx2_d, N, dt);
 	cudaDeviceSynchronize();
 
@@ -699,135 +734,135 @@ void rungeKutta(float t, float *rx_d, float *ry_d, float *vx_d, float *vy_d, flo
 }
 //////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void Output(char *fn1, char *fn2, float t, float *rx_d, float *ry_d, float *vx_d, float *vy_d){
-
-	float *rx_h;
-	float *ry_h;
-	float *vx_h;
-	float *vy_h;
-	float *ne_h;
-	float *n_h;
-	float *phi_h;
-	float *Ex_h;
-	float *Ey_h;
-	float *ne_d;
-	float *n_d;
-	float *phi_d;
-	float *Ex_d;
-	float *Ey_d;
-	int *jx_d, *jy_d; // posiciones de la malla.
-	float *yx_d, *yy_d; // posiciones de la malla.
-
-
-	int size = N * sizeof(float);
-	int size_ne = C*C * sizeof(float);
-
-	rx_h = (float *) malloc(size);
-	ry_h = (float *) malloc(size);
-	vx_h = (float *) malloc(size);
-	vy_h = (float *) malloc(size);
-	ne_h = (float *) malloc(size_ne);
-	n_h = (float *) malloc(size_ne);
-	phi_h = (float *) malloc(size_ne);
-	Ex_h = (float *) malloc(size_ne);
-	Ey_h = (float *) malloc(size_ne);
-
-
-	cudaMalloc((void **) &jx_d, size);
-	cudaMalloc((void **) &jy_d, size);
-	cudaMalloc((void **) &yx_d, size);
-	cudaMalloc((void **) &yy_d, size);
-	cudaMalloc((void **) &ne_d, size_ne);
-	cudaMalloc((void **) &n_d, size_ne);
-	cudaMalloc((void **) &phi_d, size_ne);
-	cudaMalloc((void **) &Ex_d, size_ne);
-	cudaMalloc((void **) &Ey_d, size_ne);
-
-	float blockSize = 1024;
-	dim3 dimBlock(ceil(N / blockSize), 1, 1);
-	dim3 dimBlock2(ceil(C * C / blockSize), 1, 1);
-	dim3 dimGrid(blockSize, 1, 1);
-	dim3 dimGrid3(blockSize, blockSize, 1);
-
-
-	//posicion en x.
-	cudaMemcpy(rx_h, rx_d, size, cudaMemcpyDeviceToHost);
-	// posicion en y.
-	cudaMemcpy(ry_h, ry_d, size, cudaMemcpyDeviceToHost);
-	// velocidad en x.
-	cudaMemcpy(vx_h, vx_d, size, cudaMemcpyDeviceToHost);
-	//velocidad en y.
-	cudaMemcpy(vy_h, vy_d, size, cudaMemcpyDeviceToHost);
-
-	ofstream phase;
-	phase.open(fn1);
-	for(int i=0; i<N; i++)
-		phase<<rx_h[i]<<" "<<ry_h<<" "<<vx_h<<" "<<vx_h<<" "<<vy_h<<endl;
-	phase.close();
-
-	cudaMemcpy(rx_d, rx_h, size, cudaMemcpyHostToDevice);
-	// posicion en y.
-	cudaMemcpy(ry_d, ry_h, size, cudaMemcpyHostToDevice);
-	// velocidad en x.
-	cudaMemcpy(vx_d, vx_h, size, cudaMemcpyHostToDevice);
-	//velocidad en y.
-	cudaMemcpy(vy_d, vy_h, size, cudaMemcpyHostToDevice);
-
-	inicializacionVariables<<<dimGrid,dimBlock2>>>(ne_d, n_d, phi_d, Ex_d, Ey_d,C);
-	cudaDeviceSynchronize();
-
-	Densidad(ne_d, rx_d, ry_d, jx_d, jy_d, yx_d, yy_d, C, L,N);
-
-	normalizacionDensidadOutput<<<dimGrid,dimBlock2>>>(ne_d, n_d, N, C,L);
-	cudaDeviceSynchronize();
-
-	cudaMemcpy(n_h, n_d, size_ne, cudaMemcpyDeviceToHost);
-
-	poisson (n_h, phi_h);
-
-	cudaMemcpy(phi_d, phi_h, size_ne, cudaMemcpyHostToDevice);
-
-	//calculo del campo electrico
-	Electric2 ( phi_d, Ex_d, Ey_d);
-
-	//densidad sin normalizar.
-	cudaMemcpy(ne_h, ne_d, size_ne, cudaMemcpyDeviceToHost);
-	// densidades normalizadas para la funcion Eval.
-	cudaMemcpy(n_h, n_d, size_ne, cudaMemcpyDeviceToHost);
-	// campo electrico en x
-	cudaMemcpy(Ex_h, Ex_d, size_ne, cudaMemcpyDeviceToHost);
-	// campo electrico en y
-	cudaMemcpy(Ey_h, Ey_d, size_ne, cudaMemcpyDeviceToHost);
-	// calculo de phi.
-	cudaMemcpy(phi_h, phi_d, size_ne, cudaMemcpyDeviceToHost);
-
-	ofstream data;
-	phase.open(fn2);
-	for(int i=0; i<C*C; i++)
-		data<<ne_h[i]<<" "<<n_h<<" "<<Ex_h<<" "<<Ex_h<<" "<<phi_h<<endl;
-	phase.close();
-
-
-	free(rx_h);
-	free(ry_h);
-	free(vx_h);
-	free(vy_h);
-	free(ne_h);
-	free(n_h);
-	free(phi_h);
-	free(Ex_h);
-	free(Ey_h);
-	cudaFree(jx_d);
-	cudaFree(jy_d);
-	cudaFree(yx_d);
-	cudaFree(yy_d);
-	cudaFree(ne_d);
-	cudaFree(n_d);
-	cudaFree(phi_d);
-	cudaFree(Ex_d);
-	cudaFree(Ey_d);
-
-}
+//void Output(char *fn1, char *fn2, float t, float *rx_d, float *ry_d, float *vx_d, float *vy_d){
+//
+//	float *rx_h;
+//	float *ry_h;
+//	float *vx_h;
+//	float *vy_h;
+//	float *ne_h;
+//	float *n_h;
+//	float *phi_h;
+//	float *Ex_h;
+//	float *Ey_h;
+//	float *ne_d;
+//	float *n_d;
+//	float *phi_d;
+//	float *Ex_d;
+//	float *Ey_d;
+//	int *jx_d, *jy_d; // posiciones de la malla.
+//	float *yx_d, *yy_d; // posiciones de la malla.
+//
+//
+//	int size = N * sizeof(float);
+//	int size_ne = C*C * sizeof(float);
+//
+//	rx_h = (float *) malloc(size);
+//	ry_h = (float *) malloc(size);
+//	vx_h = (float *) malloc(size);
+//	vy_h = (float *) malloc(size);
+//	ne_h = (float *) malloc(size_ne);
+//	n_h = (float *) malloc(size_ne);
+//	phi_h = (float *) malloc(size_ne);
+//	Ex_h = (float *) malloc(size_ne);
+//	Ey_h = (float *) malloc(size_ne);
+//
+//
+//	cudaMalloc((void **) &jx_d, size);
+//	cudaMalloc((void **) &jy_d, size);
+//	cudaMalloc((void **) &yx_d, size);
+//	cudaMalloc((void **) &yy_d, size);
+//	cudaMalloc((void **) &ne_d, size_ne);
+//	cudaMalloc((void **) &n_d, size_ne);
+//	cudaMalloc((void **) &phi_d, size_ne);
+//	cudaMalloc((void **) &Ex_d, size_ne);
+//	cudaMalloc((void **) &Ey_d, size_ne);
+//
+//	float blockSize = 1024;
+//	dim3 dimBlock(ceil(N / blockSize), 1, 1);
+//	dim3 dimBlock2(ceil(C * C / blockSize), 1, 1);
+//	dim3 dimGrid(blockSize, 1, 1);
+//	dim3 dimGrid3(blockSize, blockSize, 1);
+//
+//
+//	//posicion en x.
+//	cudaMemcpy(rx_h, rx_d, size, cudaMemcpyDeviceToHost);
+//	// posicion en y.
+//	cudaMemcpy(ry_h, ry_d, size, cudaMemcpyDeviceToHost);
+//	// velocidad en x.
+//	cudaMemcpy(vx_h, vx_d, size, cudaMemcpyDeviceToHost);
+//	//velocidad en y.
+//	cudaMemcpy(vy_h, vy_d, size, cudaMemcpyDeviceToHost);
+//
+//	ofstream phase;
+//	phase.open(fn1);
+//	for(int i=0; i<N; i++)
+//		phase<<rx_h[i]<<" "<<ry_h<<" "<<vx_h<<" "<<vx_h<<" "<<vy_h<<endl;
+//	phase.close();
+//
+//	cudaMemcpy(rx_d, rx_h, size, cudaMemcpyHostToDevice);
+//	// posicion en y.
+//	cudaMemcpy(ry_d, ry_h, size, cudaMemcpyHostToDevice);
+//	// velocidad en x.
+//	cudaMemcpy(vx_d, vx_h, size, cudaMemcpyHostToDevice);
+//	//velocidad en y.
+//	cudaMemcpy(vy_d, vy_h, size, cudaMemcpyHostToDevice);
+//
+//	inicializacionVariables<<<dimGrid,dimBlock2>>>(ne_d, n_d, phi_d, Ex_d, Ey_d,C);
+//	cudaDeviceSynchronize();
+//
+//	Densidad(ne_d, rx_d, ry_d, jx_d, jy_d, yx_d, yy_d, C, L,N);
+//
+//	normalizacionDensidadOutput<<<dimGrid,dimBlock2>>>(ne_d, n_d, N, C,L);
+//	cudaDeviceSynchronize();
+//
+//	cudaMemcpy(n_h, n_d, size_ne, cudaMemcpyDeviceToHost);
+//
+//	poisson (n_h, phi_h);
+//
+//	cudaMemcpy(phi_d, phi_h, size_ne, cudaMemcpyHostToDevice);
+//
+//	//calculo del campo electrico
+//	Electric2 ( phi_d, Ex_d, Ey_d);
+//
+//	//densidad sin normalizar.
+//	cudaMemcpy(ne_h, ne_d, size_ne, cudaMemcpyDeviceToHost);
+//	// densidades normalizadas para la funcion Eval.
+//	cudaMemcpy(n_h, n_d, size_ne, cudaMemcpyDeviceToHost);
+//	// campo electrico en x
+//	cudaMemcpy(Ex_h, Ex_d, size_ne, cudaMemcpyDeviceToHost);
+//	// campo electrico en y
+//	cudaMemcpy(Ey_h, Ey_d, size_ne, cudaMemcpyDeviceToHost);
+//	// calculo de phi.
+//	cudaMemcpy(phi_h, phi_d, size_ne, cudaMemcpyDeviceToHost);
+//
+//	ofstream data;
+//	phase.open(fn2);
+//	for(int i=0; i<C*C; i++)
+//		data<<ne_h[i]<<" "<<n_h<<" "<<Ex_h<<" "<<Ex_h<<" "<<phi_h<<endl;
+//	phase.close();
+//
+//
+//	free(rx_h);
+//	free(ry_h);
+//	free(vx_h);
+//	free(vy_h);
+//	free(ne_h);
+//	free(n_h);
+//	free(phi_h);
+//	free(Ex_h);
+//	free(Ey_h);
+//	cudaFree(jx_d);
+//	cudaFree(jy_d);
+//	cudaFree(yx_d);
+//	cudaFree(yy_d);
+//	cudaFree(ne_d);
+//	cudaFree(n_d);
+//	cudaFree(phi_d);
+//	cudaFree(Ex_d);
+//	cudaFree(Ey_d);
+//
+//}
 //////////////////////////////////////////////////////////////////////////////////////////////////////
 /**
  * Host function that prepares data array and passes it to the CUDA kernel.
@@ -922,25 +957,15 @@ int main() {
 
 	// llamado de las funciones.
 
-
-	eval(rx_d, vx_d,ry_d, vy_d,dydt1_d, dydt2_d);
-
-	unLoad<<<blockSize, dimBlock>>>(dydt1_d, rx_d, vx_d,N);
-	cudaDeviceSynchronize();
-	unLoad<<<blockSize, dimBlock>>>(dydt2_d, ry_d, vy_d,N);
-	cudaDeviceSynchronize();
-
-
-//
-//	for (int i = 1; i <= 10; i++)
-//		{
-//			for (int j = 0; j < skip; j++)
-//			{
-//				rungeKutta( t, rx_d, ry_d, vx_d, vy_d, dt);
-//				escapeParticulas<<<dimGrid,dimBlock>>>(rx_d, ry_d, N,L);
-//				cudaDeviceSynchronize();
-//			}
-//		}
+	for (int i = 1; i <= 10; i++)
+		{
+			for (int j = 0; j < skip; j++)
+			{
+				rungeKutta( t, rx_d, ry_d, vx_d, vy_d, dt);
+				escapeParticulas<<<dimGrid,dimBlock>>>(rx_d, ry_d, N,L);
+				cudaDeviceSynchronize();
+			}
+		}
 
 	//////////////////////////////////////////////////////////////////////////////////////////////////////
 	//Paso de memoria del dispositivo a la memoria de host.
