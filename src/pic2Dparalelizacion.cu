@@ -22,13 +22,61 @@
 
 
 
+cudaError_t error = cudaSuccess;
 
 float L, LL;
 
 int N, C, itera;
 float t;
 
+float blockSize = 1024;
+
+
 using namespace std;
+
+
+// función Maxwelliana de la distribución de las partículas.
+__device__ float distribution(float vb, float aleatorio, curandState *states) //generador de distribución maxwelliana para la velocidad
+		{
+
+	// Genera un valor random v
+	float fmax = 0.5 * (1.0 + exp(-2.0 * vb * vb));
+	float vmin = -5.0 * vb;
+	float vmax = +5.0 * vb;
+	float v;
+	float f;
+	float x;
+	int Idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+	while (true) {
+		v = vmin + ((vmax - vmin) * aleatorio);
+		f = 0.5 * (exp(-(v - vb) * (v - vb) / 2.0) + exp(-(v + vb) * (v + vb) / 2.0));
+		x = fmax * aleatorio;
+		if (x > f)
+			aleatorio = curand_uniform(states + Idx);
+		else
+			return v;
+	}
+
+	//return 0.0;
+}
+//Distribución aleatoria de las partículas.
+__global__ void distribucionParticulas(float *rx, float *ry, float *vx,
+		float *vy, int N, curandState *states, float vb, float L, int seed) {
+	int Idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+	seed = (unsigned int) (clock() * Idx);
+	curand_init(seed, 0, 0, states + Idx);
+
+	if (Idx < N) {
+		rx[Idx] = L*curand_uniform(states + Idx); //inicializando la posicion aleatoria en x
+		ry[Idx] = L*curand_uniform(states + Idx);
+		vx[Idx] = distribution(vb, curand_uniform(states + Idx), states); //;L*curand_uniform_float(states + Idx);//distribution(vb,states);                          //inicializa la velocidad con una distribucion maxwelliana
+		vy[Idx] = distribution(vb, curand_uniform(states + Idx), states); //L*curand_uniform_float(states + Idx);//distribution(vb,states);                          //inicializa la velocidad con una distribucion maxwelliana
+
+	}
+
+}
 
 // inicialización de la densidad.
 __global__ void inicializacionVariables(float *ne, float *n, float *phi, float *Ex, float *Ey, int C){
@@ -63,10 +111,26 @@ __global__ void calculoDensidadInicializacionCeldas(float *rx, float *ry,
 	}
 
 }
+
+__global__ void calculoDensidadThreaded(float *ne, int *jx, int *jy, float *yx, int C,
+		float L, int N) {
+	float dxx = L / float(C * C);
+	int i = blockIdx.x*blockDim.x + threadIdx.x;
+	if (i < N) {
+		ne[(jy[i] * C) + jx[i]] += (1. - yx[i]) / dxx;
+		if (jx[i] + 1 == C)
+			ne[(jy[i] * C)] += yx[i] / dxx;
+		else
+			ne[(jy[i] * C) + jx[i] + 1] += yx[i] / dxx;
+	}
+
+}
+
+
 __global__ void calculoDensidad(float *ne, int *jx, int *jy, float *yx, int C,
 		float L, int N) {
 	float dxx = L / float(C * C);
-	// int Id = blockIdx.x*blockDim.x + threadIdx.x;
+	//int Id = blockIdx.x*blockDim.x + threadIdx.x;
 	for (int i = 0; i < N; i++) {
 		ne[(jy[i] * C) + jx[i]] += (1. - yx[i]) / dxx;
 		if (jx[i] + 1 == C)
@@ -80,7 +144,7 @@ __global__ void calculoDensidad(float *ne, int *jx, int *jy, float *yx, int C,
 void Densidad(float *ne_d,float *rx_d, float *ry_d, int *jx_d,
 		int *jy_d, float *yx_d, float *yy_d, int C, float L, int N) {
 	//definicion de los bloques.
-	float blockSize = 1024;
+//	float blockSize = 1024;
 	dim3 dimBlock(ceil(N / blockSize), 1, 1);
 	dim3 dimBlock2(ceil(C * C / blockSize), 1, 1);
 	dim3 dimGrid(blockSize, 1, 1);
@@ -88,7 +152,7 @@ void Densidad(float *ne_d,float *rx_d, float *ry_d, int *jx_d,
 	calculoDensidadInicializacionCeldas<<<blockSize, dimBlock>>>(rx_d, ry_d,
 			jx_d, jy_d, yx_d, yy_d, N, C, L);
 	cudaDeviceSynchronize();
-	calculoDensidad<<<1, 1>>>(ne_d, jx_d, jy_d, yx_d, C, L, N); //proceso de mejora.
+	calculoDensidadThreaded<<<dimGrid, dimBlock>>>(ne_d, jx_d, jy_d, yx_d, C, L, N); //proceso de mejora.
 	cudaDeviceSynchronize();
 
 }
@@ -306,7 +370,7 @@ __global__ void electricPart3(float *phi, float *Ey, float L, int C){
 void Electric2 (float *phi_d, float *Ex_d, float *Ey_d) // recibe el potencial electroestatico calculado por la funcion poisson  y se calcula el campo electrico, tanto para X como para Y
 {
 
-  float blockSize = 1024;
+//  float blockSize = 1024;
   dim3 dimBlock(ceil(C / blockSize), 1, 1);
   dim3 dimGrid(blockSize, 1, 1);
   ElectricBordes<<<dimGrid, dimBlock>>>(phi_d, Ex_d, Ey_d,  L, C);
@@ -400,6 +464,55 @@ __global__ void campoParticula(float *rx, float *ry, float *v1, float *v2, float
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////
 
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+
+__global__ void campoParticulaThreads(float *rx, float *ry, float *v1, float *v2, float *Ex, float *Ey, float *r1dot, float *v1dot,
+		float *r2dot, float *v2dot, float L, int N, int C){
+
+
+	int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+	if (i < N)
+	{
+		float dx = L / float (C);
+		int jx = int (rx[i] / dx);
+		int jy = int (ry[i] / dx);
+		float yx = rx[i] / dx - float (jx);
+		float yy = ry[i] / dx - float (jy);
+
+		float Efieldx = 0.0;
+		float Efieldy = 0.0;
+
+
+		if ((jx+1)%C == 0)
+			Efieldx = Ex[jx] * (1. - yx) + Ex[jx-(C-1)] * yx;
+		else
+			Efieldx = Ex[jx] * (1. - yx) + Ex[jx+1] * yx;
+		if ((jy+1)%C == 0)
+			Efieldy = Ey[jy] * (1. - yy) + Ey[jy-(C-1)] * yy;
+		else
+			Efieldy = Ey[jy] * (1. - yy) + Ey[jy+1] * yy;
+
+
+		// por el esquema de normalización:
+		//derivada de la posicion =velocidad
+		//derivada de la velocidad = campo electrico en la posicion de la particula.
+		r1dot[i] = v1[i];
+		v1dot[i] = - Efieldx;
+		r2dot[i] = v2[i];
+		v2dot[i] = - Efieldy;
+
+	}
+
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
 void eval (float *rx_d, float *vx_d,float *ry_d, float *vy_d, float *dydt1_d, float *dydt2_d)
 
 //esta función itera en cada uno de los 4 pasos de RK4.
@@ -430,21 +543,73 @@ void eval (float *rx_d, float *vx_d,float *ry_d, float *vy_d, float *dydt1_d, fl
 	Ey_h = (float *) malloc(size_ne);
 
 
-	cudaMalloc((void **) &jx_d, size);
-	cudaMalloc((void **) &jy_d, size);
-	cudaMalloc((void **) &yx_d, size);
-	cudaMalloc((void **) &yy_d, size);
-	cudaMalloc((void **) &r1dot_d, size);
-	cudaMalloc((void **) &v1dot_d, size);
-	cudaMalloc((void **) &r2dot_d, size);
-	cudaMalloc((void **) &v2dot_d, size);
-	cudaMalloc((void **) &ne_d, size_ne);
-	cudaMalloc((void **) &n_d, size_ne);
-	cudaMalloc((void **) &phiFinal_d, size_ne);
-	cudaMalloc((void **) &Ex_d, size_ne);
-	cudaMalloc((void **) &Ey_d, size_ne);
+	error = cudaMalloc((void **) &jx_d, size);
+	if (error != cudaSuccess){
+		printf("Error de memoria jx_d");
+		exit(0);
+	}
+	error = cudaMalloc((void **) &jy_d, size);
+	if (error != cudaSuccess){
+			printf("Error de memoria jy_d");
+			exit(0);
+		}
+	error = cudaMalloc((void **) &yx_d, size);
+	if (error != cudaSuccess){
+		printf("Error de memoria yx_d");
+		exit(0);
+	}
+	error = cudaMalloc((void **) &yy_d, size);
+	if (error != cudaSuccess){
+		printf("Error de memoria yy_d");
+		exit(0);
+		}
+	error = cudaMalloc((void **) &r1dot_d, size);
+	if (error != cudaSuccess){
+		printf("Error de memoria r1dot_d");
+		exit(0);
+	}
+	error = cudaMalloc((void **) &v1dot_d, size);
+	if (error != cudaSuccess){
+		printf("Error de memoria v1dot_d");
+		exit(0);
+	}
+	error = cudaMalloc((void **) &r2dot_d, size);
+	if (error != cudaSuccess){
+		printf("Error de memoria r2dot_d");
+		exit(0);
+	}
+	error = cudaMalloc((void **) &v2dot_d, size);
+	if (error != cudaSuccess){
+		printf("Error de memoria v2dot_d");
+		exit(0);
+	}
+	error = cudaMalloc((void **) &ne_d, size_ne);
+	if (error != cudaSuccess){
+		printf("Error de memoria ne_d");
+		exit(0);
+	}
+	error = cudaMalloc((void **) &n_d, size_ne);
+	if (error != cudaSuccess){
+		printf("Error de memoria jn_d");
+		exit(0);
+	}
+	error = cudaMalloc((void **) &phiFinal_d, size_ne);
+	if (error != cudaSuccess){
+		printf("Error de memoria phiFInal_d");
+		exit(0);
+	}
+	error = cudaMalloc((void **) &Ex_d, size_ne);
+	if (error != cudaSuccess){
+			printf("Error de memoria Ex_d");
+			exit(0);
+		}
+	error = cudaMalloc((void **) &Ey_d, size_ne);
+	if (error != cudaSuccess){
+		printf("Error de memoria Ey_d");
+		exit(0);
+	}
 
-	float blockSize = 1024;
+//	float blockSize = 1024;
 
 	// se reinyectan partículas que escapan del espacio de simulación
 	//limites de logitud por donde se mueven las particulas
@@ -464,7 +629,12 @@ void eval (float *rx_d, float *vx_d,float *ry_d, float *vy_d, float *dydt1_d, fl
 	normalizacionDensidadEval<<<dimGrid, dimBlock2>>>(ne_d, n_d, N, C,L);
 	cudaDeviceSynchronize();
 
-	cudaMemcpy(n_h, n_d, size_ne, cudaMemcpyDeviceToHost);
+	error = cudaMemcpy(n_h, n_d, size_ne, cudaMemcpyDeviceToHost);
+
+	if (error != cudaSuccess){
+		printf("Error copiando n_d_d");
+		exit(0);
+	}
 
 	poisson (n_h, phiFinal_h);
 
@@ -475,32 +645,20 @@ void eval (float *rx_d, float *vx_d,float *ry_d, float *vy_d, float *dydt1_d, fl
 //
 //	}
 //	init.close();
-//
-	cudaMemcpy(phiFinal_d, phiFinal_h, size_ne, cudaMemcpyHostToDevice);
+
+	error = cudaMemcpy(phiFinal_d, phiFinal_h, size_ne, cudaMemcpyHostToDevice);
+	if (error != cudaSuccess){
+			printf("Error copiando phiFInal_d");
+			exit(0);
+		}
 
 
 	//calculo del campo electrico
 	Electric2 ( phiFinal_d, Ex_d, Ey_d);
 
-
-//	cudaMemcpy(Ex_h, Ex_d, size_ne, cudaMemcpyDeviceToHost);
-//	cudaMemcpy(Ey_h, Ey_d, size_ne, cudaMemcpyDeviceToHost);
-//
-//	ofstream init2;
-//	init2.open("campoelectricoeval.txt");
-//	for (int i = 0; i < C*C; i++) {
-//		init2 << Ex_h[i] << " " << Ey_h[i] <<  endl;
-//
-//	}
-//	init2.close();
-//
-//	cudaMemcpy(Ex_d, Ex_h, size_ne, cudaMemcpyHostToDevice);
-//	cudaMemcpy(Ey_d, Ey_h, size_ne, cudaMemcpyHostToDevice);
-
-
-
-	campoParticula<<<1,1>>>(rx_d,ry_d,vx_d,vy_d,Ex_d,Ey_d,r1dot_d,v1dot_d,r2dot_d,v2dot_d,L,N,C);
+	campoParticulaThreads<<<dimGrid,dimBlock>>>(rx_d,ry_d,vx_d,vy_d,Ex_d,Ey_d,r1dot_d,v1dot_d,r2dot_d,v2dot_d,L,N,C);
 	cudaDeviceSynchronize();
+
 	// se vuelven a cargar los valores de la posicion y la velocidad para una nueva iteracion
 	load<<<dimGrid, dimBlock>>>(r1dot_d,v1dot_d,dydt1_d,N);
 	cudaDeviceSynchronize();
@@ -531,23 +689,23 @@ void eval (float *rx_d, float *vx_d,float *ry_d, float *vy_d, float *dydt1_d, fl
 }
 //////////////////////////////////////////////////////////////////////////////////////////
 __global__ void inicializardydx1Dydx2(float *dydx1_d, float *dydx2_d, float *k1_d, float *k2_d, float *k3_d, float * k4_d,
-		 float *l1_d, float *l2_d, float *l3_d, float *l4_d, float *f1_d,float *f2_d, int N){
+		float *l1_d, float *l2_d, float *l3_d, float *l4_d, float *f1_d,float *f2_d, int N){
 
 	int Id = blockIdx.x * blockDim.x + threadIdx.x;
-		if (Id < (2*N)) {
-			dydx1_d[Id] = 0.0;
-			dydx2_d[Id] = 0.0;
-			k1_d[Id] = 0.0;
-			k2_d[Id] = 0.0;
-			k3_d[Id] = 0.0;
-			k4_d[Id] = 0.0;
-			l1_d[Id] = 0.0;
-			l2_d[Id] = 0.0;
-			l3_d[Id] = 0.0;
-			l4_d[Id] = 0.0;
-			f1_d[Id] = 0.0;
-			f1_d[Id] = 0.0;
-		}
+	if (Id < (2*N)) {
+		dydx1_d[Id] = 0.0;
+		dydx2_d[Id] = 0.0;
+		k1_d[Id] = 0.0;
+		k2_d[Id] = 0.0;
+		k3_d[Id] = 0.0;
+		k4_d[Id] = 0.0;
+		l1_d[Id] = 0.0;
+		l2_d[Id] = 0.0;
+		l3_d[Id] = 0.0;
+		l4_d[Id] = 0.0;
+		f1_d[Id] = 0.0;
+		f1_d[Id] = 0.0;
+	}
 }
 
 
@@ -572,6 +730,7 @@ __global__ void calculoPrimerasVariablesKLRK4(float *k1_d, float *l1_d, float *d
 	if (i < 2*N){
 		k1_d[i] = dt*dydx1_d[i];
 		l1_d[i] = dt*dydx2_d[i];
+
 
 	}
 
@@ -618,26 +777,90 @@ void rungeKutta(float &t, float *rx_d, float *ry_d, float *vx_d, float *vy_d, fl
 	float *k1_d, *k2_d,*k3_d, *k4_d,*l1_d,*l2_d,*l3_d,*l4_d,*f1_d,*f2_d;
 	float *rx_aux, *ry_aux, *vx_aux, *vy_aux;
 	///////////////////////////////////////////////////////////////////////////////////
-	cudaMalloc((void **) &dydx1_d, size1);
-	cudaMalloc((void **) &dydx2_d, size1);
-	cudaMalloc((void **) &k1_d, size1);
-	cudaMalloc((void **) &k2_d, size1);
-	cudaMalloc((void **) &k3_d, size1);
-	cudaMalloc((void **) &k4_d, size1);
-	cudaMalloc((void **) &l1_d, size1);
-	cudaMalloc((void **) &l2_d, size1);
-	cudaMalloc((void **) &l3_d, size1);
-	cudaMalloc((void **) &l4_d, size1);
-	cudaMalloc((void **) &f1_d, size1);
-	cudaMalloc((void **) &f2_d, size1);
-	cudaMalloc((void **) &rx_aux, size);
-	cudaMalloc((void **) &ry_aux, size);
-	cudaMalloc((void **) &vx_aux, size);
-	cudaMalloc((void **) &vy_aux, size);
+	error =cudaMalloc((void **) &dydx1_d, size1);
+	if (error != cudaSuccess){
+		printf("Error de memoria dydx1_d");
+		exit(0);
+	}
+	error =cudaMalloc((void **) &dydx2_d, size1);
+	if (error != cudaSuccess){
+		printf("Error de memoria dydx2_d");
+		exit(0);
+	}
+	error =cudaMalloc((void **) &k1_d, size1);
+	if (error != cudaSuccess){
+		printf("Error de memoria k1_d");
+		exit(0);
+	}
+	error =cudaMalloc((void **) &k2_d, size1);
+	if (error != cudaSuccess){
+		printf("Error de memoria k2_d");
+		exit(0);
+	}
+	error =cudaMalloc((void **) &k3_d, size1);
+	if (error != cudaSuccess){
+		printf("Error de memoria k3_d");
+		exit(0);
+	}
+	error =cudaMalloc((void **) &k4_d, size1);
+	if (error != cudaSuccess){
+		printf("Error de memoria k4_d");
+		exit(0);
+	}
+	error =cudaMalloc((void **) &l1_d, size1);
+	if (error != cudaSuccess){
+		printf("Error de memoria l1_d");
+		exit(0);
+	}
+	error =cudaMalloc((void **) &l2_d, size1);
+	if (error != cudaSuccess){
+		printf("Error de memoria l2_d");
+		exit(0);
+	}
+	error =cudaMalloc((void **) &l3_d, size1);
+	if (error != cudaSuccess){
+		printf("Error de memoria l3_d");
+		exit(0);
+	}
+	error =cudaMalloc((void **) &l4_d, size1);
+	if (error != cudaSuccess){
+		printf("Error de memoria l4_d");
+		exit(0);
+	}
+	error =cudaMalloc((void **) &f1_d, size1);
+	if (error != cudaSuccess){
+		printf("Error de memoria f1_d");
+		exit(0);
+	}
+	error =cudaMalloc((void **) &f2_d, size1);
+	if (error != cudaSuccess){
+		printf("Error de memoria k2_d");
+		exit(0);
+	}
+	error =cudaMalloc((void **) &rx_aux, size);
+	if (error != cudaSuccess){
+		printf("Error de memoria ry_aux");
+		exit(0);
+	}
+	error =cudaMalloc((void **) &ry_aux, size);
+	if (error != cudaSuccess){
+		printf("Error de memoria ry_aux");
+		exit(0);
+	}
+	error =cudaMalloc((void **) &vx_aux, size);
+	if (error != cudaSuccess){
+		printf("Error de memoria vx_aux");
+		exit(0);
+	}
+	error =cudaMalloc((void **) &vy_aux, size);
+	if (error != cudaSuccess){
+		printf("Error de memoria vy_aux");
+		exit(0);
+	}
 
 
 	//////////////////////////////////////////////////////////////////////////////////////
-	float blockSize = 1024;
+//	float blockSize = 1024;
 
 	// cantidad de nloques  utilizar en el calculo.
 	dim3 dimBlock(ceil(N / blockSize), 1, 1);
@@ -670,10 +893,10 @@ void rungeKutta(float &t, float *rx_d, float *ry_d, float *vx_d, float *vy_d, fl
 	//paso 1.
 	eval (rx_aux, vx_aux, ry_aux, vy_aux, dydx1_d, dydx2_d);
 
-	calculoPrimerasVariablesKLRK4<<<dimGrid, dimBlock1>>>(k1_d,l1_d, dydx1_d, dydx2_d, N, dt);
+	calculoPrimerasVariablesKLRK4<<<dimGrid, dimBlock1>>>(k2_d,l2_d, dydx1_d, dydx2_d, N, dt);
 	cudaDeviceSynchronize();
 
-	calculoSegundasVariablesF1F2RK4<<<dimGrid, dimBlock>>>(k1_d, l1_d,rx_aux,ry_aux,vx_aux, vy_aux,f1_d, f2_d, N);
+	calculoSegundasVariablesF1F2RK4<<<dimGrid, dimBlock>>>(k2_d, l2_d,rx_aux,ry_aux,vx_aux, vy_aux,f1_d, f2_d, N);
 	cudaDeviceSynchronize();
 
 	unLoad<<<dimGrid, dimBlock>>>(f1_d, rx_aux, vx_aux,N);
@@ -686,10 +909,10 @@ void rungeKutta(float &t, float *rx_d, float *ry_d, float *vx_d, float *vy_d, fl
 
 	eval (rx_aux, vx_aux, ry_aux, vy_aux, dydx1_d, dydx2_d);
 
-	calculoPrimerasVariablesKLRK4<<<dimGrid, dimBlock1>>>(k1_d,l1_d, dydx1_d, dydx2_d, N, dt);
+	calculoPrimerasVariablesKLRK4<<<dimGrid, dimBlock1>>>(k3_d,l3_d, dydx1_d, dydx2_d, N, dt);
 	cudaDeviceSynchronize();
 
-	calculoSegundasVariablesF1F2RK4<<<dimGrid, dimBlock>>>(k1_d, l1_d,rx_aux,ry_aux,vx_aux, vy_aux,f1_d, f2_d, N);
+	calculoSegundasVariablesF1F2RK4<<<dimGrid, dimBlock>>>(k3_d, l3_d,rx_aux,ry_aux,vx_aux, vy_aux,f1_d, f2_d, N);
 	cudaDeviceSynchronize();
 
 	unLoad<<<dimGrid, dimBlock>>>(f1_d, rx_aux, vx_aux,N);
@@ -702,7 +925,7 @@ void rungeKutta(float &t, float *rx_d, float *ry_d, float *vx_d, float *vy_d, fl
 
 	eval (rx_aux, vx_aux, ry_aux, vy_aux, dydx1_d, dydx2_d);
 
-	calculoPrimerasVariablesKLRK4<<<dimGrid, dimBlock1>>>(k1_d,l1_d, dydx1_d, dydx2_d, N, dt);
+	calculoPrimerasVariablesKLRK4<<<dimGrid, dimBlock1>>>(k4_d,l4_d, dydx1_d, dydx2_d, N, dt);
 	cudaDeviceSynchronize();
 
 
@@ -869,19 +1092,19 @@ void rungeKutta(float &t, float *rx_d, float *ry_d, float *vx_d, float *vy_d, fl
  */
 int main() {
 	// Parametros
-	L = 64.0;     // dominio de la solucion 0 <= x <= L (en longitudes de debye)
-	//L=LL*LL;
-	N = 10000;            // Numero de particulas
-	C = 64;            // Número de celdas.
-	//float vb = 3.0;    // velocidad promedio de los electrones
+	L = 512.0;     // dominio de la solucion 0 <= x <= L (en longitudes de debye)
+	N = 900000;            // Numero de particulas
+	C = 512;            // Número de celdas.
+	float vb = 3.0;    // velocidad promedio de los electrones
 	float t = 0.0;
 
 	//double kappa = 2. * M_PI / (L);
-	float dt=0.1;    // delta tiempo (en frecuencias inversas del plasma)
-	float tmax=40;  // cantidad de iteraciones. deben ser 100 mil segun el material
+	float dt = 0.1;    // delta tiempo (en frecuencias inversas del plasma)
+	float tmax = 40;  // cantidad de iteraciones. deben ser 100 mil segun el material
 	int skip = int (tmax / dt) / 10; //saltos del algoritmo para reportar datos
 
-
+	//0 Tesla, 1 780
+	cudaSetDevice(0);
 
 
 	//Inicializacion de la posición de las particulas en x, y y velocidad en vx,vy del host y dispositivo.
@@ -902,86 +1125,133 @@ int main() {
 
 
 	//reserva de memoria del dispositivo.
-	cudaMalloc((void **) &rx_d, size);
-	cudaMalloc((void **) &ry_d, size);
-	cudaMalloc((void **) &vx_d, size);
-	cudaMalloc((void **) &vy_d, size);
-	cudaMalloc((void **) &dydt1_d, size1);
-	cudaMalloc((void **) &dydt2_d, size1);
+	error = cudaMalloc((void **) &rx_d, size);
+	if (error != cudaSuccess){
+		printf("Error asignando memoria a rx_d");
+		exit(0);
+	}
 
-//	curandState *devStates;
-//	cudaMalloc((void **) &devStates, N * sizeof(curandState));
+	error = cudaMalloc((void **) &ry_d, size);
+	if (error != cudaSuccess){
+		printf("Error asignando memoria a ry_d");
+		exit(0);
+	}
+
+	error = cudaMalloc((void **) &vx_d, size);
+	if (error != cudaSuccess){
+		printf("Error asignando memoria a vx_d");
+		exit(0);
+	}
+	error = cudaMalloc((void **) &vy_d, size);
+	if (error != cudaSuccess){
+		printf("Error asignando memoria a vy_d");
+		exit(0);
+	}
+	error = cudaMalloc((void **) &dydt1_d, size1);
+	if (error != cudaSuccess){
+		printf("Error asignando memoria a dydt1_d");
+		exit(0);
+	}
+	error = cudaMalloc((void **) &dydt2_d, size1);
+	if (error != cudaSuccess){
+		printf("Error asignando memoria a dydt2_d");
+		exit(0);
+	}
+
+	curandState *devStates;
+	error = cudaMalloc((void **) &devStates, N * sizeof(curandState));
 
 	// Tamaño de los hilos y bloques a utilizar en el proceso de paralelizacion del algoritmo.
-	float blockSize = 1024;
+//	float blockSize = 1024;
 	dim3 dimBlock(ceil(N / blockSize), 1, 1);
 	dim3 dimBlock2(ceil(C * C / blockSize), 1, 1);
 	dim3 dimBlock3(ceil(C * C / blockSize), ceil(C * C / blockSize), 1);
 	dim3 dimGrid(blockSize, 1, 1);
 	dim3 dimGrid3(blockSize, blockSize, 1);
-//	int seed = time(NULL);
+	int seed = time(NULL);
 
-	// leer un archivo que contiene las posiciones y las velocidades de las particulas.
+	distribucionParticulas<<<blockSize, dimBlock>>>(rx_d, ry_d, vx_d, vy_d, N,
+			devStates, vb, L, seed);
+	cudaDeviceSynchronize();
 
-	FILE *initFile;
-
-	initFile = fopen("/home/yen/Desktop/phase0.txt","r");
-
-	if(initFile==NULL){
-
-		printf("Archivo inexistente, verifique\n");
-
-	return (0);
-
-	}
-
-	for (int i = 0; i < N; ++i) {
-
-		fscanf(initFile,"%f %f %f %f", &rx_h[i],&ry_h[i],&vx_h[i],&vy_h[i]);
-
-	}
-	fclose(initFile);
+//	// leer un archivo que contiene las posiciones y las velocidades de las particulas.
+//
+//	FILE *initFile;
+//
+//	initFile = fopen("/home/yen/Desktop/phase0.txt","r");
+//
+//	if(initFile==NULL){
+//
+//		printf("Archivo inexistente, verifique\n");
+//
+//	return (0);
+//
+//	}
+//
+//	for (int i = 0; i < N; ++i) {
+//
+//		fscanf(initFile,"%f %f %f %f", &rx_h[i],&ry_h[i],&vx_h[i],&vy_h[i]);
+//
+//	}
+//	fclose(initFile);
 
 
 	// paso de los datos desde la memoria del host hasta el dispositivo.
 	////////////////////////////////////////////////////////////////////////////////////////////////////////
-	cudaMemcpy(rx_d, rx_h, size, cudaMemcpyHostToDevice);
-	// posicion en y.
-	cudaMemcpy(ry_d, ry_h, size, cudaMemcpyHostToDevice);
-	// velocidad en x.
-	cudaMemcpy(vx_d, vx_h, size, cudaMemcpyHostToDevice);
-	//velocidad en y.
-	cudaMemcpy(vy_d, vy_h, size, cudaMemcpyHostToDevice);
+//	cudaMemcpy(rx_d, rx_h, size, cudaMemcpyHostToDevice);
+//	// posicion en y.
+//	cudaMemcpy(ry_d, ry_h, size, cudaMemcpyHostToDevice);
+//	// velocidad en x.
+//	cudaMemcpy(vx_d, vx_h, size, cudaMemcpyHostToDevice);
+//	//velocidad en y
+//	cudaMemcpy(vy_d, vy_h, size, cudaMemcpyHostToDevice);
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 	// llamado de las funciones.
 
-	for (int i = 1; i <= 10; i++)
+	for (int i = 1; i <= 1; i++)
+	{
+		for (int j = 0; j < 1; j++)
 		{
-			for (int j = 0; j < skip; j++)
-			{
-				rungeKutta( t, rx_d, ry_d, vx_d, vy_d, dt);
-				escapeParticulas<<<dimGrid,dimBlock>>>(rx_d, ry_d, N,L);
-				cudaDeviceSynchronize();
-			}
+			rungeKutta( t, rx_d, ry_d, vx_d, vy_d, dt);
+			escapeParticulas<<<dimGrid,dimBlock>>>(rx_d, ry_d, N,L);
+			cudaDeviceSynchronize();
 		}
+	}
 
 	//////////////////////////////////////////////////////////////////////////////////////////////////////
 	//Paso de memoria del dispositivo a la memoria de host.
 
 	//posicion en x.
-	cudaMemcpy(rx_h, rx_d, size, cudaMemcpyDeviceToHost);
+	error = cudaMemcpy(rx_h, rx_d, size, cudaMemcpyDeviceToHost);
+	if (error != cudaSuccess){
+		printf("Error copiando rx_d");
+		exit(0);
+	}
 	// posicion en y.
-	cudaMemcpy(ry_h, ry_d, size, cudaMemcpyDeviceToHost);
+	error = cudaMemcpy(ry_h, ry_d, size, cudaMemcpyDeviceToHost);
+	if (error != cudaSuccess){
+		printf("Error copiando ry_d");
+		exit(0);
+	}
 	// velocidad en x.
-	cudaMemcpy(vx_h, vx_d, size, cudaMemcpyDeviceToHost);
+	error = cudaMemcpy(vx_h, vx_d, size, cudaMemcpyDeviceToHost);
+	if (error != cudaSuccess){
+		printf("Error copiando rx_d");
+		exit(0);
+	}
 	//velocidad en y.
-	cudaMemcpy(vy_h, vy_d, size, cudaMemcpyDeviceToHost);
+	error = cudaMemcpy(vy_h, vy_d, size, cudaMemcpyDeviceToHost);
+	if (error != cudaSuccess){
+		printf("Error copiando rx_d");
+		exit(0);
+	}
 
 
 	/////////////////////////////////////////IMPRIMIR DATOS ///////////////////////////////////////////////
 
+	cout << "test" << endl;
 
 	ofstream init;
 	init.open("distribucionInicial.txt");
@@ -998,6 +1268,7 @@ int main() {
 	free(ry_h);
 	free(vx_h);
 	free(vy_h);
+	cudaFree(devStates);
 	cudaFree(rx_d);
 	cudaFree(ry_d);
 	cudaFree(vx_d);
