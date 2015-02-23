@@ -30,6 +30,7 @@ int N, C, itera;
 float t;
 
 float blockSize = 1024;
+float blockSize2 = 32;
 
 
 using namespace std;
@@ -178,243 +179,12 @@ __global__ void normalizacionDensidadOutput(float *ne, float *n1, int N, int C,
 
 }
 
-/////////////////////////////////////kernelsPoissonParalelo///////////////////////////////////////////////////////////////
-
-__global__ void floatToComplex(float *rho, cufftComplex *ff,  int C){
-	int i = blockIdx.x * blockDim.x + threadIdx.x;
-	int j = blockIdx.y * blockDim.y + threadIdx.y;
-	int index = i*C+j;
-	if((i < C) && (j < C)){
-		ff[index].x = rho[index];
-		ff[index].y = 0.;
-
-	}
-}
-
-__global__ void normalizacionSalidaTranfForward(cufftComplex *FF_TF,
-		cufftComplex *FF_TF_N, int C) {
-		int i = blockIdx.x * blockDim.x + threadIdx.x;
-		int j = blockIdx.y * blockDim.y + threadIdx.y;
-		int index = i*C+j;
-		if((i < C) && (j < C)){
-			FF_TF_N[index].x = FF_TF[index].x / float(C * C * C * C);
-			FF_TF_N[index].y = FF_TF[index].y / float(C * C * C * C);
-
-	}
-}
-
-
-__global__ void complexTofloat(cufftComplex *FF_TI, float *phi, int C){
-	int i = blockIdx.x * blockDim.x + threadIdx.x;
-	int j = blockIdx.y * blockDim.y + threadIdx.y;
-	int index = i*C+j;
-	if(i < C && j < C){
-		phi[index] = FF_TI[index].x/float(1.e+7);
-
-
-	}
-
-
-}
-
-void Poisson(cufftComplex *U, float L, int C) {// pasar a calculo paralelo
-	float dx = L / float(C);
-	U[0].x = 0.0;
-	U[0].y = 0.0;
-	float2 i;
-	i.x = 0.0;
-	i.y = L; //creamos una variable compleja para poder aplicar la discretizacion.
-	float2 W;
-	W.x = exp(2.0 * M_PI * i.x / float(C));
-	W.y = exp(2.0 * M_PI * i.y / float(C));
-	float2 Wm;
-	Wm.x = L;
-	Wm.y = L;
-	float2 Wn;
-	Wn.x = L;
-	Wn.y = L;
-	for (int m = 0; m < C; m++) {
-		for (int n = 0; n < C; n++) {
-			float2 denom;
-			denom.x = 4.0;
-			denom.y = 4.0;
-			denom.x -= Wm.x + L / Wm.x + Wn.x + L / Wn.x;
-			denom.y -= Wm.y + L / Wm.y + Wn.y + L / Wn.y; //se calcula el denominador para cada celda, segun el equema de discretizacion
-			if (denom.x != 0.0 && denom.y != 0.0) {
-				U[m * C + n].x *= dx * dx / denom.x;
-				U[m * C + n].y *= dx * dx / denom.y;
-			}
-			Wn.x *= W.x; //se multiplica por la constante W
-			Wn.y *= W.y;
-		}
-		Wm.x *= W.x;
-		Wm.y *= W.y;
-	}
-}
-
-
-
-
-////////////////////////////////////PoissonParalelo////////////////////////////////////////////////////////////////////////
-
-void PoissonParalelo(float *rho, float *phi){
-
-	cufftComplex *U;
-	//cufftComplex *ff_h;
-
-	cufftComplex *ff;
-	cufftComplex  *FF_TF;
-	cufftComplex  *FF_TI;
-	//cufftComplex  *FF_TI_h;
-	cufftComplex *FF_TF_N;
-
-
-
-
-	int size1 = C * C * sizeof(cufftComplex);
-
-	U = (cufftComplex *) malloc(size1);
-	//ff_h = (cufftComplex *) malloc(size1);
-	//FF_TI_h = (cufftComplex *) malloc(size1);
-
-
-
-
-	error = cudaMalloc((void **) &ff, size1);
-	if (error != cudaSuccess){
-		printf("Error de memoria ff");
-		exit(0);
-	}
-	error = cudaMalloc((void **) &FF_TF, size1);
-	if (error != cudaSuccess){
-		printf("Error de memoria FF");
-		exit(0);
-	}
-	error = cudaMalloc((void **) &FF_TI, size1);
-	if (error != cudaSuccess){
-		printf("Error de memoria TI");
-		exit(0);
-	}
-
-	error = cudaMalloc((void **) &FF_TF_N, size1);
-	if (error != cudaSuccess){
-		printf("Error de memoria TI");
-		exit(0);
-	}
-
-
-
-	error = cudaMemset(ff,0,size1);
-	if (error != cudaSuccess){
-		printf("Error cudaMemset ff");
-		exit(0);
-	}
-
-	error = cudaMemset(FF_TF,0,size1);
-	if (error != cudaSuccess){
-		printf("Error cudaMemset TF");
-		exit(0);
-	}
-	error = cudaMemset(FF_TI,0,size1);
-	if (error != cudaSuccess){
-		printf("Error cudaMemset TI");
-		exit(0);
-	}
-
-	error = cudaMemset(FF_TF_N,0,size1);
-	if (error != cudaSuccess){
-		printf("Error cudaMemset TI");
-		exit(0);
-	}
-
-	dim3 dimBlock(ceil(C / blockSize), ceil(C / blockSize), 1);
-	dim3 dimGrid(blockSize,blockSize, 1);
-
-	floatToComplex<<<dimGrid, dimBlock>>>(rho, ff,  C);
-	cudaDeviceSynchronize();
-
-//	error = cudaMemcpy(ff_h,ff, size1,cudaMemcpyDeviceToHost);
-//	if (error != cudaSuccess){
-//		printf("Error copiando ff");
-//		exit(0);
-//	}
-//
-//	ofstream init;
-//	init.open("EntradaPoisson");//se escribe un archivo de salida para analizar los datos. la salida corresponde al potencial electrostatico en cada celda conocido como phi.
-//	for (int i = 0; i < C; i++){
-//		for (int j = 0; j < C; j++){
-//			init<<ff_h[(i*C)+j].x <<" ";
-//		}
-//		init<<endl;
-//	}
-//
-//	init.close();
-
-	cufftHandle plan;
-	cufftPlan2d(&plan, C, C, CUFFT_C2C);
-	cufftExecC2C(plan, ff,FF_TF, CUFFT_FORWARD);
-	cudaDeviceSynchronize();
-
-	normalizacionSalidaTranfForward<<<dimGrid, dimBlock>>>(FF_TF, FF_TF_N, C);
-	cudaDeviceSynchronize();
-
-
-
-
-	error = cudaMemcpy(U,FF_TF_N,size1,cudaMemcpyDeviceToHost);
-	if (error != cudaSuccess){
-		printf("Error copiando U");
-		exit(0);
-	}
-
-	//ofstream init;
-
-
-	Poisson(U, L, C);
-
-	error = cudaMemcpy(FF_TF,U, size1,cudaMemcpyHostToDevice);
-	if (error != cudaSuccess){
-		printf("Error copiando n_d");
-		exit(0);
-	}
-
-	cufftExecC2C(plan, FF_TF, FF_TI, CUFFT_INVERSE);
-
-//	error = cudaMemcpy(FF_TI_h,FF_TI, size1,cudaMemcpyDeviceToHost);
-//		if (error != cudaSuccess){
-//			printf("Error copiando n_d");
-//			exit(0);
-//		}
-//
-//	init.open("despuesdela INversa");//se escribe un archivo de salida para analizar los datos. la salida corresponde al potencial electrostatico en cada celda conocido como phi.
-//	for (int i = 0; i < C; i++){
-//		for (int j = 0; j < C; j++){
-//			init<<FF_TI_h[(i*C)+j].x <<" ";
-//		}
-//		init<<endl;
-//	}
-
-	//init.close();
-
-	complexTofloat<<<dimGrid, dimBlock>>>(FF_TI, phi,  C);
-	cudaDeviceSynchronize();
-
-
-	free(U);
-	cudaFree(ff);
-	cudaFree(FF_TF);
-	cudaFree(FF_TI);
-
-}
-
-
 
 /////////////////////////////////AQUI EMPIEZA POISSON /////////////////////////////////////////////////////////////////////
 
-void poissonSecuencial (float * rho, float *phi){
+void poisson (float * rho, float *phi){
 
 	float dx = L/float(C-1);
-
 
 	vector<float>  Ur(C*C), Ui(C*C);
 
@@ -469,7 +239,7 @@ void poissonSecuencial (float * rho, float *phi){
 			for (int n = 0; n < C; n++)
 			{
 				complex<float> denom = 4.0;
-				denom -= Wm + L / Wm + Wn + L / Wn; //se calcula el denominador para cada celda, segun el equema de discretizacion
+				denom -= Wm + (L / Wm) + Wn + (L / Wn); //se calcula el denominador para cada celda, segun el equema de discretizacion
 				if (denom != float(0.0)){
 					U[m][n].re *= dx *dx / denom.real();
 					U[m][n].im *= dx *dx / denom.imag();
@@ -534,20 +304,6 @@ void poissonSecuencial (float * rho, float *phi){
 			}
 		}
 
-//
-//		init.open("despues_inversa_y_salida");//se escribe un archivo de salida para analizar los datos. la salida corresponde al potencial electrostatico en cada celda conocido como phi.
-//		for (int i = 0; i < C; i++){
-//			for (int j = 0; j < C; j++){
-//				init<<phi[(i*C)+j]<<" ";
-//			}
-//			init<<endl;
-//		}
-//
-//		init.close();
-
-
-
-
 }
 //////////////////////////////////////////////////////////////////////////////////////////////////////
 __global__ void ElectricBordes(float *phi, float *Ex, float *Ey, float L, int C) // recibe el potencial electroestatico calculado por la funcion poisson  y se calcula el campo electrico, tanto para X como para Y
@@ -596,12 +352,12 @@ void Electric2 (float *phi_d, float *Ex_d, float *Ey_d) // recibe el potencial e
   ElectricBordes<<<dimGrid, dimBlock>>>(phi_d, Ex_d, Ey_d,  L, C);
   cudaDeviceSynchronize();
 
-  dim3 dimBlock1(ceil(C  / blockSize),ceil(C  / blockSize),1);
-  dim3 dimGrid1(blockSize,blockSize,1);
+  dim3 dimBlock1(ceil(C  / blockSize2),ceil(C  / blockSize2),1);
+  dim3 dimGrid1(blockSize2,blockSize2,1);
   electricPart2<<<dimGrid1,dimBlock1>>>(phi_d,Ex_d,L,C);
   cudaDeviceSynchronize();
 
-  dim3 dimBlock2(ceil(C*C  / blockSize), 1, 1);
+  dim3 dimBlock2(ceil(C*C / blockSize), 1, 1);
   electricPart3<<<dimGrid, dimBlock2>>>(phi_d, Ey_d,L,C);
   cudaDeviceSynchronize();
 
@@ -642,51 +398,9 @@ __global__ void escapeParticulas(float *rx, float *ry, int N, float L) {
 	}
 
 }
-//////////////////////////////////////////////////////////////////////////////////////////////////////
-
-__global__ void campoParticula(float *rx, float *ry, float *v1, float *v2, float *Ex, float *Ey, float *r1dot, float *v1dot,
-		float *r2dot, float *v2dot, float L, int N, int C){
-
-	for (int i = 0; i < N; i++)
-	{
-		float dx = L / float (C);
-		int jx = int (rx[i] / dx);
-		int jy = int (ry[i] / dx);
-		float yx = rx[i] / dx - float (jx);
-		float yy = ry[i] / dx - float (jy);
-
-		float Efieldx = 0.0;
-		float Efieldy = 0.0;
-
-
-		if ((jx+1)%C == 0)
-			Efieldx = Ex[jx] * (1. - yx) + Ex[jx-(C-1)] * yx;
-		else
-			Efieldx = Ex[jx] * (1. - yx) + Ex[jx+1] * yx;
-		if ((jy+1)%C == 0)
-			Efieldy = Ey[jy] * (1. - yy) + Ey[jy-(C-1)] * yy;
-		else
-			Efieldy = Ey[jy] * (1. - yy) + Ey[jy+1] * yy;
-
-
-		// por el esquema de normalización:
-		//derivada de la posicion =velocidad
-		//derivada de la velocidad = campo electrico en la posicion de la particula.
-		r1dot[i] = v1[i];
-		v1dot[i] = - Efieldx;
-		r2dot[i] = v2[i];
-		v2dot[i] = - Efieldy;
-
-	}
-
-}
-
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////
 
-
-
-//////////////////////////////////////////////////////////////////////////////////////////////////////
 
 __global__ void campoParticulaThreads(float *rx, float *ry, float *v1, float *v2, float *Ex, float *Ey, float *r1dot, float *v1dot,
 		float *r2dot, float *v2dot, float L, int N, int C){
@@ -849,25 +563,25 @@ void eval (float *rx_d, float *vx_d,float *ry_d, float *vy_d, float *dydt1_d, fl
 	normalizacionDensidadEval<<<dimGrid, dimBlock2>>>(ne_d, n_d, N, C,L);
 	cudaDeviceSynchronize();
 
-	//PoissonParalelo(n_d, phiFinal_d);
+//	PoissonParalelo(n_d, phiFinal_d);
 
-	error = cudaMemcpy(phiFinal_h, phiFinal_d, size_ne, cudaMemcpyDeviceToHost);
-	if (error != cudaSuccess){
-		printf("Error copiando n_d");
-		exit(0);
-	}
-
-
-	ofstream init;
-	init.open("poisson");//se escribe un archivo de salida para analizar los datos. la salida corresponde al potencial electrostatico en cada celda conocido como phi.
-	for (int i = 0; i < C; i++){
-		for (int j = 0; j < C; j++){
-			init<<phiFinal_h[(i*C)+j]<<" ";
-		}
-		init<<endl;
-	}
-	init.close();
-
+//	error = cudaMemcpy(phiFinal_h, phiFinal_d, size_ne, cudaMemcpyDeviceToHost);
+//	if (error != cudaSuccess){
+//		printf("Error copiando n_d");
+//		exit(0);
+//	}
+//
+//
+//	ofstream init;
+//	init.open("poisson");//se escribe un archivo de salida para analizar los datos. la salida corresponde al potencial electrostatico en cada celda conocido como phi.
+//	for (int i = 0; i < C; i++){
+//		for (int j = 0; j < C; j++){
+//			init<<phiFinal_h[(i*C)+j]<<" ";
+//		}
+//		init<<endl;
+//	}
+//	init.close();
+//
 	error = cudaMemcpy(n_h, n_d, size_ne, cudaMemcpyDeviceToHost);
 
 	if (error != cudaSuccess){
@@ -875,7 +589,7 @@ void eval (float *rx_d, float *vx_d,float *ry_d, float *vy_d, float *dydt1_d, fl
 		exit(0);
 	}
 
-	poissonSecuencial (n_h, phiFinal_h);
+	poisson (n_h, phiFinal_h);
 
 //	ofstream init;
 //	init.open("phiEval.txt");
@@ -1001,9 +715,6 @@ __global__ void calculoDefinitivoRK4(float *k1_d,float *k2_d,float *k3_d,float *
 
 
 }
-//////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
 //////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void rungeKutta(float &t, float *rx_d, float *ry_d, float *vx_d, float *vy_d, float dt){
@@ -1194,137 +905,6 @@ void rungeKutta(float &t, float *rx_d, float *ry_d, float *vx_d, float *vy_d, fl
 
 }
 //////////////////////////////////////////////////////////////////////////////////////////////////////
-
-//void Output(char *fn1, char *fn2, float t, float *rx_d, float *ry_d, float *vx_d, float *vy_d){
-//
-//	float *rx_h;
-//	float *ry_h;
-//	float *vx_h;
-//	float *vy_h;
-//	float *ne_h;
-//	float *n_h;
-//	float *phi_h;
-//	float *Ex_h;
-//	float *Ey_h;
-//	float *ne_d;
-//	float *n_d;
-//	float *phi_d;
-//	float *Ex_d;
-//	float *Ey_d;
-//	int *jx_d, *jy_d; // posiciones de la malla.
-//	float *yx_d, *yy_d; // posiciones de la malla.
-//
-//
-//	int size = N * sizeof(float);
-//	int size_ne = C*C * sizeof(float);
-//
-//	rx_h = (float *) malloc(size);
-//	ry_h = (float *) malloc(size);
-//	vx_h = (float *) malloc(size);
-//	vy_h = (float *) malloc(size);
-//	ne_h = (float *) malloc(size_ne);
-//	n_h = (float *) malloc(size_ne);
-//	phi_h = (float *) malloc(size_ne);
-//	Ex_h = (float *) malloc(size_ne);
-//	Ey_h = (float *) malloc(size_ne);
-//
-//
-//	cudaMalloc((void **) &jx_d, size);
-//	cudaMalloc((void **) &jy_d, size);
-//	cudaMalloc((void **) &yx_d, size);
-//	cudaMalloc((void **) &yy_d, size);
-//	cudaMalloc((void **) &ne_d, size_ne);
-//	cudaMalloc((void **) &n_d, size_ne);
-//	cudaMalloc((void **) &phi_d, size_ne);
-//	cudaMalloc((void **) &Ex_d, size_ne);
-//	cudaMalloc((void **) &Ey_d, size_ne);
-//
-//	float blockSize = 1024;
-//	dim3 dimBlock(ceil(N / blockSize), 1, 1);
-//	dim3 dimBlock2(ceil(C * C / blockSize), 1, 1);
-//	dim3 dimGrid(blockSize, 1, 1);
-//	dim3 dimGrid3(blockSize, blockSize, 1);
-//
-//
-//	//posicion en x.
-//	cudaMemcpy(rx_h, rx_d, size, cudaMemcpyDeviceToHost);
-//	// posicion en y.
-//	cudaMemcpy(ry_h, ry_d, size, cudaMemcpyDeviceToHost);
-//	// velocidad en x.
-//	cudaMemcpy(vx_h, vx_d, size, cudaMemcpyDeviceToHost);
-//	//velocidad en y.
-//	cudaMemcpy(vy_h, vy_d, size, cudaMemcpyDeviceToHost);
-//
-//	ofstream phase;
-//	phase.open(fn1);
-//	for(int i=0; i<N; i++)
-//		phase<<rx_h[i]<<" "<<ry_h<<" "<<vx_h<<" "<<vx_h<<" "<<vy_h<<endl;
-//	phase.close();
-//
-//	cudaMemcpy(rx_d, rx_h, size, cudaMemcpyHostToDevice);
-//	// posicion en y.
-//	cudaMemcpy(ry_d, ry_h, size, cudaMemcpyHostToDevice);
-//	// velocidad en x.
-//	cudaMemcpy(vx_d, vx_h, size, cudaMemcpyHostToDevice);
-//	//velocidad en y.
-//	cudaMemcpy(vy_d, vy_h, size, cudaMemcpyHostToDevice);
-//
-//	inicializacionVariables<<<dimGrid,dimBlock2>>>(ne_d, n_d, phi_d, Ex_d, Ey_d,C);
-//	cudaDeviceSynchronize();
-//
-//	Densidad(ne_d, rx_d, ry_d, jx_d, jy_d, yx_d, yy_d, C, L,N);
-//
-//	normalizacionDensidadOutput<<<dimGrid,dimBlock2>>>(ne_d, n_d, N, C,L);
-//	cudaDeviceSynchronize();
-//
-//	cudaMemcpy(n_h, n_d, size_ne, cudaMemcpyDeviceToHost);
-//
-//	poisson (n_h, phi_h);
-//
-//	cudaMemcpy(phi_d, phi_h, size_ne, cudaMemcpyHostToDevice);
-//
-//	//calculo del campo electrico
-//	Electric2 ( phi_d, Ex_d, Ey_d);
-//
-//	//densidad sin normalizar.
-//	cudaMemcpy(ne_h, ne_d, size_ne, cudaMemcpyDeviceToHost);
-//	// densidades normalizadas para la funcion Eval.
-//	cudaMemcpy(n_h, n_d, size_ne, cudaMemcpyDeviceToHost);
-//	// campo electrico en x
-//	cudaMemcpy(Ex_h, Ex_d, size_ne, cudaMemcpyDeviceToHost);
-//	// campo electrico en y
-//	cudaMemcpy(Ey_h, Ey_d, size_ne, cudaMemcpyDeviceToHost);
-//	// calculo de phi.
-//	cudaMemcpy(phi_h, phi_d, size_ne, cudaMemcpyDeviceToHost);
-//
-//	ofstream data;
-//	phase.open(fn2);
-//	for(int i=0; i<C*C; i++)
-//		data<<ne_h[i]<<" "<<n_h<<" "<<Ex_h<<" "<<Ex_h<<" "<<phi_h<<endl;
-//	phase.close();
-//
-//
-//	free(rx_h);
-//	free(ry_h);
-//	free(vx_h);
-//	free(vy_h);
-//	free(ne_h);
-//	free(n_h);
-//	free(phi_h);
-//	free(Ex_h);
-//	free(Ey_h);
-//	cudaFree(jx_d);
-//	cudaFree(jy_d);
-//	cudaFree(yx_d);
-//	cudaFree(yy_d);
-//	cudaFree(ne_d);
-//	cudaFree(n_d);
-//	cudaFree(phi_d);
-//	cudaFree(Ex_d);
-//	cudaFree(Ey_d);
-//
-//}
-//////////////////////////////////////////////////////////////////////////////////////////////////////
 /**
  * Host function that prepares data array and passes it to the CUDA kernel.
  */
@@ -1402,10 +982,7 @@ int main() {
 	// Tamaño de los hilos y bloques a utilizar en el proceso de paralelizacion del algoritmo.
 //	float blockSize = 1024;
 	dim3 dimBlock(ceil(N / blockSize), 1, 1);
-	dim3 dimBlock2(ceil(C * C / blockSize), 1, 1);
-	dim3 dimBlock3(ceil(C * C / blockSize), ceil(C * C / blockSize), 1);
 	dim3 dimGrid(blockSize, 1, 1);
-	dim3 dimGrid3(blockSize, blockSize, 1);
 	int seed = time(NULL);
 
 	distribucionParticulas<<<blockSize, dimBlock>>>(rx_d, ry_d, vx_d, vy_d, N,
@@ -1416,46 +993,61 @@ int main() {
 
 	for (int i = 1; i <= 10; i++)
 	{
-	for (int j = 0; j < skip; j++)
+		for (int j = 0; j <skip; j++)
 		{
 			rungeKutta( t, rx_d, ry_d, vx_d, vy_d, dt);
 			escapeParticulas<<<dimGrid,dimBlock>>>(rx_d, ry_d, N,L);
 			cudaDeviceSynchronize();
 		}
+/////////////////////////////////////////////////////////////////////////////////
+		error = cudaMemcpy(rx_h, rx_d, size, cudaMemcpyDeviceToHost);
+		if (error != cudaSuccess){
+			printf("Error copiando rx_d");
+			exit(0);
+		}
+		// posicion en y.
+		error = cudaMemcpy(ry_h, ry_d, size, cudaMemcpyDeviceToHost);
+		if (error != cudaSuccess){
+			printf("Error copiando ry_d");
+			exit(0);
+		}
+		// velocidad en x.
+		error = cudaMemcpy(vx_h, vx_d, size, cudaMemcpyDeviceToHost);
+		if (error != cudaSuccess){
+			printf("Error copiando rx_d");
+			exit(0);
+		}
+		//velocidad en y.
+		error = cudaMemcpy(vy_h, vy_d, size, cudaMemcpyDeviceToHost);
+		if (error != cudaSuccess){
+			printf("Error copiando rx_d");
+			exit(0);
+		}
+
+		ofstream init;
+		char ichar[2];
+		sprintf(ichar,"%d",i);
+		init.open(ichar);
+		init << 9999<<endl;
+		for (int k = 0; k < N; k++) {
+			init << rx_h[k] << " " << vx_h[k] << endl;
+
+		}
+		init.close();
+///////////////////////////////////////////////////////////////////////
+
 	}
 
 	//////////////////////////////////////////////////////////////////////////////////////////////////////
 	//Paso de memoria del dispositivo a la memoria de host.
 
 	//posicion en x.
-	error = cudaMemcpy(rx_h, rx_d, size, cudaMemcpyDeviceToHost);
-	if (error != cudaSuccess){
-		printf("Error copiando rx_d");
-		exit(0);
-	}
-	// posicion en y.
-	error = cudaMemcpy(ry_h, ry_d, size, cudaMemcpyDeviceToHost);
-	if (error != cudaSuccess){
-		printf("Error copiando ry_d");
-		exit(0);
-	}
-	// velocidad en x.
-	error = cudaMemcpy(vx_h, vx_d, size, cudaMemcpyDeviceToHost);
-	if (error != cudaSuccess){
-		printf("Error copiando rx_d");
-		exit(0);
-	}
-	//velocidad en y.
-	error = cudaMemcpy(vy_h, vy_d, size, cudaMemcpyDeviceToHost);
-	if (error != cudaSuccess){
-		printf("Error copiando rx_d");
-		exit(0);
-	}
+
 
 
 //////////////////////////////////////////////IMPRIMIR DATOS ///////////////////////////////////////////////
 
-	cout << "test" << endl;
+	/*cout << "test" << endl;
 
 	ofstream init;
 	init.open("distribucionInicial.txt");
@@ -1464,7 +1056,7 @@ int main() {
 
 	}
 
-	init.close();
+	init.close();*/
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	/*Liberar memoria*/
